@@ -394,7 +394,8 @@ EOF
   systemctl daemon-reload
   # Enabled but NOT started: it needs config.yml from the Panel first.
   systemctl enable wings
-  /usr/local/bin/wings --version
+  /usr/local/bin/wings version
+  systemctl is-enabled --quiet wings
 }
 
 s_ufw() {
