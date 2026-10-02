@@ -348,7 +348,7 @@ s_egg() {
   local EGG_NAME="${BRAND} Node.js"
   local WORK
   WORK="$(mktemp -d /tmp/relisys-egg.XXXXXX)"
-  trap 'rm -rf "$WORK"' EXIT
+  trap "rm -rf '${WORK}'" EXIT   # expand now: WORK is local and gone when the trap fires
   chmod 755 "$WORK"
 
   cat > "$WORK/egg.json" <<'EGG_JSON_EOF'
