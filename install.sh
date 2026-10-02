@@ -110,6 +110,10 @@ do_reset() {
 [[ "$ADMIN_USER" =~ ^[A-Za-z0-9_.-]{3,}$ ]] \
   || die "Username must be 3+ chars: letters, numbers, _ . - only."
 
+SAFE_TEXT='^[A-Za-z0-9 ._-]+$'
+[[ "$BRAND"  =~ $SAFE_TEXT ]] || die "BRAND may only contain letters, numbers, space . _ -"
+[[ "$AUTHOR" =~ $SAFE_TEXT ]] || die "AUTHOR may only contain letters, numbers, space . _ -"
+
 [[ "$HOST" =~ ^[A-Za-z0-9.:-]+$ ]] \
   || die "Host/IP contains invalid characters: $HOST"
 
@@ -336,6 +340,254 @@ s_permissions() {
   [[ "$(stat -c %U "$PANEL_DIR/.env")" == "www-data" ]]
 }
 
+s_egg() {
+  # Creates the "Discord Bots" nest and imports OUR OWN egg (no vndel / third-party
+  # launcher: the start logic lives inside the egg's startup command).
+  local NEST_NAME="Discord Bots"
+  local NEST_DESC="${BRAND} hosting - Discord bots and Node.js apps"
+  local EGG_NAME="${BRAND} Node.js"
+  local WORK
+  WORK="$(mktemp -d /tmp/relisys-egg.XXXXXX)"
+  trap 'rm -rf "$WORK"' EXIT
+  chmod 755 "$WORK"
+
+  cat > "$WORK/egg.json" <<'EGG_JSON_EOF'
+{
+    "_comment": "Generated for __BRAND__ - PTDL_v2 egg",
+    "meta": {
+        "version": "PTDL_v2",
+        "update_url": null
+    },
+    "exported_at": "2026-10-02T00:00:00+00:00",
+    "name": "__BRAND__ Node.js",
+    "author": "__AUTHOR_EMAIL__",
+    "description": "__BRAND__ Node.js runner for Discord bots and any Node.js app (by __AUTHOR__). Runs a .js/.mjs/.ts file or any command (npm run start), installs dependencies with npm / yarn / pnpm, optional git clone.",
+    "features": [],
+    "docker_images": {
+        "Node.js 22 (LTS)": "ghcr.io/ptero-eggs/yolks:nodejs_22",
+        "Node.js 24 (LTS)": "ghcr.io/ptero-eggs/yolks:nodejs_24",
+        "Node.js 25": "ghcr.io/ptero-eggs/yolks:nodejs_25",
+        "Node.js 23": "ghcr.io/ptero-eggs/yolks:nodejs_23",
+        "Node.js 21": "ghcr.io/ptero-eggs/yolks:nodejs_21",
+        "Node.js 20 (LTS)": "ghcr.io/ptero-eggs/yolks:nodejs_20",
+        "Node.js 19": "ghcr.io/ptero-eggs/yolks:nodejs_19",
+        "Node.js 18": "ghcr.io/ptero-eggs/yolks:nodejs_18",
+        "Node.js 17": "ghcr.io/ptero-eggs/yolks:nodejs_17",
+        "Node.js 16": "ghcr.io/ptero-eggs/yolks:nodejs_16",
+        "Node.js 14": "ghcr.io/ptero-eggs/yolks:nodejs_14",
+        "Node.js 12": "ghcr.io/ptero-eggs/yolks:nodejs_12"
+    },
+    "file_denylist": [],
+    "startup": "cd /home/container; if [ \"${AUTO_UPDATE}\" = \"1\" ] && [ -d .git ]; then git pull --ff-only || echo \"__BRAND__: git pull failed - keeping the current files\"; fi; if [ -n \"${UNNODE_PACKAGES}\" ]; then npm uninstall ${UNNODE_PACKAGES}; fi; if [ \"${INSTALL_DEPS}\" = \"1\" ] && [ -f package.json ]; then if [ -f pnpm-lock.yaml ]; then npx --yes pnpm install; elif [ -f yarn.lock ]; then npx --yes yarn install; else npm install; fi; fi; if [ -n \"${NODE_PACKAGES}\" ]; then npm install ${NODE_PACKAGES}; fi; CMD=\"${COMMAND}\"; if [ -z \"${CMD}\" ]; then if [ -f package.json ] && grep -q '\"start\"' package.json; then CMD=\"npm start\"; else CMD=\"index.js\"; fi; fi; NOSP=\"${CMD// /}\"; echo \"__BRAND__:\" \"starting\" \"${CMD}\"; if [ \"${#NOSP}\" != \"${#CMD}\" ]; then exec sh -c \"${CMD}\"; elif [ \"${CMD%.ts}\" != \"${CMD}\" ]; then if [ \"${TS_RUNNER}\" = \"ts-node\" ]; then exec npx --yes -p typescript -p ts-node ts-node ${NODE_ARGS} ${CMD}; else exec npx --yes tsx ${NODE_ARGS} ${CMD}; fi; else exec node ${NODE_ARGS} ${CMD}; fi",
+    "config": {
+        "files": "{}",
+        "startup": "{\"done\": \"__BRAND__: starting\"}",
+        "logs": "{}",
+        "stop": "^C"
+    },
+    "scripts": {
+        "installation": {
+            "script": "#!/bin/bash\n# __BRAND__ Node.js egg - install script (runs once, in a temporary container)\nset -u\napt-get update -qq\napt-get install -y -qq --no-install-recommends git ca-certificates\nmkdir -p /mnt/server\ncd /mnt/server || exit 1\n\nif [ \"${USER_UPLOAD:-0}\" = \"1\" ] || [ \"${USER_UPLOAD:-0}\" = \"true\" ] || [ -z \"${GIT_ADDRESS:-}\" ]; then\n    echo \"__BRAND__: no git repository to clone. Upload your files from the Files tab (or SFTP).\"\n    exit 0\nfi\n\nADDRESS=\"${GIT_ADDRESS}\"\ncase \"${ADDRESS}\" in\n    *.git) ;;\n    *) ADDRESS=\"${ADDRESS}.git\" ;;\nesac\nif [ -n \"${USERNAME:-}\" ] && [ -n \"${ACCESS_TOKEN:-}\" ]; then\n    ADDRESS=\"https://${USERNAME}:${ACCESS_TOKEN}@$(printf '%s' \"${ADDRESS}\" | cut -d/ -f3-)\"\nfi\n\nif [ -n \"$(ls -A /mnt/server 2>/dev/null)\" ]; then\n    if [ -d .git ]; then\n        echo \"__BRAND__: folder is already a git checkout, pulling the latest changes.\"\n        git pull --ff-only || echo \"__BRAND__: git pull failed, the files were left as they are.\"\n    else\n        echo \"__BRAND__: folder is not empty and not a git checkout, nothing was changed.\"\n    fi\n    exit 0\nfi\n\nif [ -n \"${BRANCH:-}\" ]; then\n    git clone --single-branch --branch \"${BRANCH}\" \"${ADDRESS}\" . || exit 1\nelse\n    git clone \"${ADDRESS}\" . || exit 1\nfi\necho \"__BRAND__: repository cloned. Dependencies are installed on the first start.\"\n",
+            "container": "node:22-bookworm-slim",
+            "entrypoint": "bash"
+        }
+    },
+    "variables": [
+        {
+            "name": "Start file or command",
+            "description": "A file to run (index.js, bot.mjs, src/main.ts) or a full command (npm run start). Empty = package.json start script, else index.js.",
+            "env_variable": "COMMAND",
+            "default_value": "index.js",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:500",
+            "field_type": "text"
+        },
+        {
+            "name": "Node options",
+            "description": "Extra options for node, e.g. --enable-source-maps",
+            "env_variable": "NODE_ARGS",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:300",
+            "field_type": "text"
+        },
+        {
+            "name": "Install dependencies",
+            "description": "1 = install package.json dependencies on every start (npm, or yarn / pnpm when their lock file exists).",
+            "env_variable": "INSTALL_DEPS",
+            "default_value": "1",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|boolean",
+            "field_type": "text"
+        },
+        {
+            "name": "Additional Node packages",
+            "description": "Packages to install, separated by spaces (e.g. axios discord.js@14)",
+            "env_variable": "NODE_PACKAGES",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:500",
+            "field_type": "text"
+        },
+        {
+            "name": "Uninstall Node packages",
+            "description": "Packages to remove, separated by spaces",
+            "env_variable": "UNNODE_PACKAGES",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:500",
+            "field_type": "text"
+        },
+        {
+            "name": "TypeScript runner",
+            "description": "tsx (default, fast) or ts-node. Only used when the start file ends with .ts",
+            "env_variable": "TS_RUNNER",
+            "default_value": "tsx",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|in:tsx,ts-node",
+            "field_type": "text"
+        },
+        {
+            "name": "Git Repo Address",
+            "description": "Cloned on install. Leave empty to upload your files instead.",
+            "env_variable": "GIT_ADDRESS",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:300",
+            "field_type": "text"
+        },
+        {
+            "name": "Install Branch",
+            "description": "Empty = the default branch",
+            "env_variable": "BRANCH",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:100",
+            "field_type": "text"
+        },
+        {
+            "name": "Auto Update",
+            "description": "1 = git pull on every start (when the folder is a git checkout)",
+            "env_variable": "AUTO_UPDATE",
+            "default_value": "0",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|boolean",
+            "field_type": "text"
+        },
+        {
+            "name": "User Uploaded Files",
+            "description": "1 = skip the git clone on install",
+            "env_variable": "USER_UPLOAD",
+            "default_value": "0",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|boolean",
+            "field_type": "text"
+        },
+        {
+            "name": "Git Username",
+            "description": "For a private repository",
+            "env_variable": "USERNAME",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:100",
+            "field_type": "text"
+        },
+        {
+            "name": "Git Access Token",
+            "description": "For a private repository (a token, not your password)",
+            "env_variable": "ACCESS_TOKEN",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:200",
+            "field_type": "text"
+        }
+    ]
+}
+EGG_JSON_EOF
+
+  cat > "$WORK/seed.php" <<'SEED_PHP_EOF'
+<?php
+// Creates the Nest + imports the egg using the Panel's own services
+// (same classes the official EggSeeder uses).
+use Illuminate\Http\UploadedFile;
+use Pterodactyl\Models\Egg;
+use Pterodactyl\Models\Nest;
+use Pterodactyl\Services\Eggs\Sharing\EggImporterService;
+use Pterodactyl\Services\Nests\NestCreationService;
+
+$panel = getenv('RELISYS_PANEL_DIR');
+require $panel . '/vendor/autoload.php';
+$app = require $panel . '/bootstrap/app.php';
+$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+
+$nestName = getenv('RELISYS_NEST_NAME');
+$nestDesc = getenv('RELISYS_NEST_DESC');
+$eggName  = getenv('RELISYS_EGG_NAME');
+$eggFile  = getenv('RELISYS_EGG_FILE');
+$author   = getenv('RELISYS_AUTHOR');
+
+foreach (['nestName', 'nestDesc', 'eggName', 'eggFile', 'author'] as $v) {
+    if (!$$v) { fwrite(STDERR, "Missing value: $v\n"); exit(2); }
+}
+
+$nest = Nest::where('name', $nestName)->first();
+if (!$nest) {
+    $nest = $app->make(NestCreationService::class)->handle(
+        ['name' => $nestName, 'description' => $nestDesc],
+        $author
+    );
+    echo "Created nest: {$nest->name} (id {$nest->id})\n";
+} else {
+    echo "Nest already exists: {$nest->name} (id {$nest->id})\n";
+}
+
+$egg = Egg::where('nest_id', $nest->id)->where('name', $eggName)->first();
+if (!$egg) {
+    $file = new UploadedFile($eggFile, basename($eggFile), 'application/json', null, true);
+    $egg = $app->make(EggImporterService::class)->handle($file, $nest->id);
+    echo "Imported egg: {$egg->name} (id {$egg->id})\n";
+} else {
+    echo "Egg already exists: {$egg->name} (id {$egg->id})\n";
+}
+SEED_PHP_EOF
+
+  # brand the egg
+  sed -i -e "s|__BRAND__|${BRAND}|g" \
+         -e "s|__AUTHOR_EMAIL__|${ADMIN_EMAIL}|g" \
+         -e "s|__AUTHOR__|${AUTHOR}|g" "$WORK/egg.json"
+  if grep -q '__BRAND__\|__AUTHOR' "$WORK/egg.json"; then
+    echo "Unreplaced placeholders left in the egg file"; return 1
+  fi
+  php -r 'exit(json_decode(file_get_contents($argv[1])) === null ? 1 : 0);' "$WORK/egg.json" \
+    || { echo "The egg JSON is not valid"; return 1; }
+
+  chmod 644 "$WORK/egg.json" "$WORK/seed.php"
+  runuser -u www-data -- env \
+    RELISYS_PANEL_DIR="$PANEL_DIR" \
+    RELISYS_NEST_NAME="$NEST_NAME" \
+    RELISYS_NEST_DESC="$NEST_DESC" \
+    RELISYS_EGG_NAME="$EGG_NAME" \
+    RELISYS_EGG_FILE="$WORK/egg.json" \
+    RELISYS_AUTHOR="$ADMIN_EMAIL" \
+    php "$WORK/seed.php"
+
+  # verify in the database: nest exists, egg exists, and all 12 variables came with it
+  mariadb -u root -N -e "SELECT COUNT(*) FROM \`${DB_NAME}\`.eggs e JOIN \`${DB_NAME}\`.nests n ON n.id = e.nest_id WHERE n.name='${NEST_NAME}' AND e.name='${EGG_NAME}';" | grep -qx "1"
+  mariadb -u root -N -e "SELECT COUNT(*) FROM \`${DB_NAME}\`.egg_variables v JOIN \`${DB_NAME}\`.eggs e ON e.id = v.egg_id WHERE e.name='${EGG_NAME}';" | grep -qx "12"
+}
+
 s_cron() {
   # "|| true": crontab -l returns 1 when no crontab exists yet (this was the
   # bug that silently killed the old script under "set -e").
@@ -528,6 +780,7 @@ run_step "Run database migrations"       s_migrate       s_configure
 run_step "Create admin user"             s_admin         s_migrate
 run_step "Create location (dc1)"         s_location      s_migrate
 run_step "Fix file permissions"          s_permissions   s_download_panel
+run_step "Create 'Discord Bots' nest + our own egg" s_egg s_migrate s_permissions s_configure
 run_step "Set up cron job"               s_cron          s_permissions
 run_step "Set up queue worker (pteroq)"  s_pteroq        s_migrate s_permissions s_services
 run_step "Configure nginx (HTTP)"        s_nginx         s_download_panel s_services
@@ -567,7 +820,8 @@ if [[ $FAIL_N -eq 0 && $SKIP_N -eq 0 ]]; then
     " 2) Admin > Nodes > Create New (Memory/Disk Overallocate = 0)." \
     " 3) Node > Configuration > paste into /etc/pterodactyl/config.yml" \
     " 4) systemctl start wings" \
-    " 5) Add Allocations, import your eggs." \
+    " 5) Admin > Nodes > your node > Allocation: add IP + ports 3000-3999." \
+    " 6) Create a server: Nest 'Discord Bots' > egg '${BRAND} Node.js'." \
     "" \
     "(No reboot was done. Reboot manually if the kernel was updated.)"
   exit 0
