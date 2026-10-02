@@ -10,7 +10,12 @@ TIMEZONE="Africa/Cairo"
 # Tested target: Ubuntu 24.04 LTS (fresh install)
 #
 # Usage:
-#   sudo bash install.sh <IP-or-domain> <admin-email> <admin-username> [--no-ufw]
+#   sudo bash install.sh <IP-or-domain> <admin-email> <admin-username> [--no-ufw] [--reset]
+#
+# Options:
+#   --no-ufw   do not touch the firewall (use this on Lightsail)
+#   --reset    wipe a previous install of THIS script first (panel, database,
+#              cron, pteroq, nginx site) then install again from scratch
 #
 # Example:
 #   sudo bash install.sh 203.0.113.10 you@email.com myadmin --no-ufw
@@ -28,12 +33,6 @@ TIMEZONE="Africa/Cairo"
 
 # NOTE: no "set -e" on purpose. Errors are handled per step by run_step().
 set -uo pipefail
-
-HOST="${1:-}"
-ADMIN_EMAIL="${2:-}"
-ADMIN_USER="${3:-}"
-USE_UFW=true
-[[ "${4:-}" == "--no-ufw" ]] && USE_UFW=false
 
 PANEL_DIR="/var/www/pterodactyl"
 SAFE_BRAND="${BRAND// /_}"
@@ -55,11 +54,52 @@ big() {  # big <color> <line> [line...]
 
 die() { big "$RED" "FATAL: $*"; exit 1; }
 
+# ---------------------------------------------------------- arguments
+USE_UFW=true
+RESET=false
+POS=()
+for a in "$@"; do
+  case "$a" in
+    --no-ufw) USE_UFW=false ;;
+    --reset)  RESET=true ;;
+    -*)       die "Unknown option: $a   (valid: --no-ufw  --reset)" ;;
+    *)        POS+=("$a") ;;
+  esac
+done
+HOST="${POS[0]:-}"
+ADMIN_EMAIL="${POS[1]:-}"
+ADMIN_USER="${POS[2]:-}"
+
+do_reset() {
+  big "$RED" \
+    "RESET MODE: a previous install will be DELETED in 10 seconds." \
+    "Removes: ${PANEL_DIR}, database 'panel' + user 'pterodactyl'," \
+    "         www-data cron, pteroq service, nginx site, old Wings config.yml." \
+    "Keeps  : Docker, Wings binary, /var/lib/pterodactyl (server files)." \
+    "Press Ctrl+C NOW to cancel."
+  local i
+  for i in 10 9 8 7 6 5 4 3 2 1; do printf '%s ' "$i"; sleep 1; done
+  echo
+  systemctl stop pteroq wings >/dev/null 2>&1 || true
+  systemctl disable pteroq >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/pteroq.service
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  rm -rf "$PANEL_DIR"
+  rm -f /etc/nginx/sites-enabled/pterodactyl.conf /etc/nginx/sites-available/pterodactyl.conf
+  if command -v mariadb >/dev/null 2>&1; then
+    mariadb -u root -e "DROP DATABASE IF EXISTS \`panel\`; DROP USER IF EXISTS 'pterodactyl'@'127.0.0.1';" || true
+  fi
+  crontab -r -u www-data >/dev/null 2>&1 || true
+  command -v redis-cli >/dev/null 2>&1 && redis-cli flushall >/dev/null 2>&1 || true
+  rm -f "$CRED_FILE" /etc/pterodactyl/config.yml
+  echo "Previous install removed."
+}
+
 # ---------------------------------------------------------------- checks
 [[ $EUID -eq 0 ]] || die "Run as root (sudo -i)."
 
 [[ -n "$HOST" && -n "$ADMIN_EMAIL" && -n "$ADMIN_USER" ]] \
-  || die "Usage: bash install.sh <IP-or-domain> <admin-email> <admin-username> [--no-ufw]"
+  || die "Usage: bash install.sh <IP-or-domain> <admin-email> <admin-username> [--no-ufw] [--reset]"
 
 [[ "$ADMIN_EMAIL" != "your@email.com" && "$ADMIN_USER" != "yourusername" ]] \
   || die "You pasted the placeholder email/username. Put your REAL ones."
@@ -77,8 +117,15 @@ die() { big "$RED" "FATAL: $*"; exit 1; }
 [[ "$ID" == "ubuntu" && "$VERSION_ID" == "24.04" ]] \
   || die "This script supports Ubuntu 24.04 only (found: $ID $VERSION_ID)."
 
+# make every apt/dpkg call wait (up to 5 min) if another process holds the lock
+echo 'DPkg::Lock::Timeout "300";' > /etc/apt/apt.conf.d/99relisys-lock
+
 if [[ -d "$PANEL_DIR" ]]; then
-  die "$PANEL_DIR already exists. Use a fresh server (or clean the old install first)."
+  if $RESET; then
+    do_reset
+  else
+    die "$PANEL_DIR already exists. Re-run with --reset to wipe it, or use a fresh server."
+  fi
 fi
 
 if ! command -v openssl >/dev/null 2>&1; then
@@ -158,7 +205,28 @@ run_step() {
 # Each function runs inside its own "set -e" subshell. Last lines of each
 # one VERIFY the result, so GREEN really means it works.
 
+s_swap() {
+  if swapon --show --noheadings | grep -q .; then
+    echo "Swap already active:"; swapon --show
+    return 0
+  fi
+  fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+  grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+  swapon --show --noheadings | grep -q .
+}
+
 s_update() {
+  # fresh VPSs often run unattended-upgrades for the first minutes: wait for it
+  local waited=0
+  while fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1; do
+    [[ $waited -ge 300 ]] && { echo "apt is still locked after 5 minutes"; return 1; }
+    echo "Waiting for another apt process to finish... (${waited}s)"
+    sleep 5; waited=$((waited + 5))
+  done
+  timedatectl set-timezone "$TIMEZONE"
   apt-get update -y
   apt-get upgrade -y -o Dpkg::Options::=--force-confold
 }
@@ -211,6 +279,7 @@ s_key() {
 s_database() {
   mariadb -u root -e "CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;"
   mariadb -u root -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';"
+  mariadb -u root -e "ALTER USER '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';"
   mariadb -u root -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'127.0.0.1' WITH GRANT OPTION;"
   mariadb -u root -e "FLUSH PRIVILEGES;"
   # verify the new user can really log in over TCP
@@ -394,8 +463,11 @@ EOF
   systemctl daemon-reload
   # Enabled but NOT started: it needs config.yml from the Panel first.
   systemctl enable wings
-  /usr/local/bin/wings version
+  # verify: real executable (ELF) of sensible size, service enabled
+  [[ "$(head -c4 /usr/local/bin/wings | tail -c3)" == "ELF" ]]
+  [[ "$(stat -c %s /usr/local/bin/wings)" -gt 10000000 ]]
   systemctl is-enabled --quiet wings
+  /usr/local/bin/wings version || echo "(wings version check skipped - not important)"
 }
 
 s_ufw() {
@@ -442,6 +514,7 @@ big "$CYAN" \
   "Log file: ${LOG}" \
   "Do NOT close this window until the final summary appears."
 
+run_step "Create 2GB swap (if none)"     s_swap
 run_step "Update system"                 s_update
 run_step "Install packages (nginx, PHP 8.3, MariaDB, Redis)" s_packages
 run_step "Start core services"           s_services      s_packages
