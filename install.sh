@@ -127,7 +127,7 @@ chown -R www-data:www-data "$PANEL_DIR"/*
 
 # ------------------------------------------------------- cron + queue
 log "Setting up cron and queue worker..."
-( crontab -l -u www-data 2>/dev/null; \
+( crontab -l -u www-data 2>/dev/null || true; \
   echo "* * * * * php ${PANEL_DIR}/artisan schedule:run >> /dev/null 2>&1" ) \
   | sort -u | crontab -u www-data -
 
